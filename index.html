@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Load Cell Telemetry Dashboard</title>
+    
+    <!-- Leaflet Maps CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
+        .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: auto; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        #map { height: 400px; border-radius: 8px; }
+        canvas { width: 100% !important; height: 400px !important; }
+        h2 { margin-top: 0; color: #333; }
+        
+        /* Mobile responsive */
+        @media (max-width: 768px) { .dashboard { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard">
+        <!-- Map Container -->
+        <div class="card">
+            <h2>GPS Tracking</h2>
+            <div id="map"></div>
+        </div>
+
+        <!-- Chart Container -->
+        <div class="card">
+            <h2>Weight Over Time</h2>
+            <canvas id="weightChart"></canvas>
+        </div>
+    </div>
+
+    <!-- Leaflet Maps JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+        async function loadDashboardData() {
+            // 1. Fetch the data from your own API
+            const response = await fetch('/api/logs');
+            const data = await response.json();
+
+            if (data.length === 0) return;
+
+            // 2. Setup the Map
+            const firstPoint = data[0];
+            const map = L.map('map').setView([firstPoint.latitude, firstPoint.longitude], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+
+            // Add pins to the map
+            data.forEach(log => {
+                const date = new Date(log.timestamp).toLocaleString();
+                L.marker([log.latitude, log.longitude])
+                 .addTo(map)
+                 .bindPopup(`<b>Weight:</b> ${log.weight} kg<br><b>Time:</b> ${date}`);
+            });
+
+            // 3. Setup the Chart
+            const ctx = document.getElementById('weightChart').getContext('2d');
+            
+            // Format data for Chart.js
+            const labels = data.map(log => {
+                const d = new Date(log.timestamp);
+                return `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`; // Just time for X-axis
+            });
+            const weights = data.map(log => log.weight);
+
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Load Cell Weight (kg)',
+                        data: weights,
+                        borderColor: '#2563eb',
+                        backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3, // Adds a slight curve to the line
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false
+                }
+            });
+        }
+
+        // Run when the page loads
+        loadDashboardData();
+    </script>
+</body>
+</html>
