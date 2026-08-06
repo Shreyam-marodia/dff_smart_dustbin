@@ -4,6 +4,7 @@ from sqlalchemy import create_engine, Column, Integer, Float, String
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from typing import List
 import os
+from fastapi.responses import HTMLResponse
 
 # 1. Database Setup
 # Render provides the DATABASE_URL environment variable automatically
@@ -73,3 +74,10 @@ def sync_logs(logs: List[LogData], db: Session = Depends(get_db)):
 def get_logs(db: Session = Depends(get_db)):
     """Fetches all data points to display on the Flutter map."""
     return db.query(LogEntry).all()
+
+@app.get("/", response_class=HTMLResponse, summary="Serve Web Dashboard")
+def serve_dashboard():
+    """Reads the index.html file and serves it to the browser."""
+    with open("index.html", "r") as f:
+        html_content = f.read()
+    return HTMLResponse(content=html_content, status_code=200)
