@@ -4,18 +4,46 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Load Cell Telemetry Dashboard</title>
-    
+
     <!-- Leaflet Maps CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-    
+
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
         .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: auto; }
-        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); position: relative; }
+        .card-header { display: flex; align-items: center; justify-content: space-between; }
+        h2 { margin: 0 0 12px 0; color: #333; }
+
         #map { height: 400px; border-radius: 8px; }
-        canvas { width: 100% !important; height: 400px !important; }
-        h2 { margin-top: 0; color: #333; }
-        
+
+        /* Chart needs a fixed-height wrapper, NOT a forced canvas size —
+           forcing canvas width/height fights Chart.js's own device-pixel-ratio
+           sizing logic and causes blurry / stretched renders. */
+        .chart-wrap { position: relative; height: 400px; }
+
+        .status-dot {
+            width: 9px; height: 9px; border-radius: 50%;
+            background: #9ca3af; display: inline-block; margin-right: 6px;
+            transition: background 0.2s ease;
+        }
+        .status-dot.live { background: #22c55e; }
+        .status-dot.error { background: #ef4444; }
+        .status-text { font-size: 12px; color: #6b7280; }
+
+        .empty-state, .error-banner {
+            position: absolute; inset: 0; display: flex; align-items: center;
+            justify-content: center; text-align: center; color: #6b7280;
+            font-size: 14px; padding: 20px; box-sizing: border-box;
+        }
+        .error-banner { color: #b91c1c; background: rgba(254, 242, 242, 0.9); border-radius: 8px; display: none; }
+        .error-banner.show { display: flex; }
+
+        .stats-row { display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+        .stat { font-size: 12px; color: #6b7280; }
+        .stat strong { display: block; font-size: 18px; color: #111827; font-weight: 600; }
+        .downsample-note { font-size: 11px; color: #9ca3af; margin-top: 8px; text-align: right; }
+
         /* Mobile responsive */
         @media (max-width: 768px) { .dashboard { grid-template-columns: 1fr; } }
     </style>
@@ -25,16 +53,27 @@
     <div class="dashboard">
         <!-- Map Container -->
         <div class="card">
-            <h2>GPS Tracking</h2>
+            <div class="card-header">
+                <h2>GPS Tracking</h2>
+                <span class="status-text"><span id="statusDot" class="status-dot"></span><span id="statusText">Connecting…</span></span>
+            </div>
             <div id="map"></div>
+            <div id="mapEmpty" class="empty-state">No logs yet — waiting for data…</div>
         </div>
 
         <!-- Chart Container -->
         <div class="card">
             <h2>Weight Over Time</h2>
-            <canvas id="weightChart"></canvas>
+            <div id="statsRow" class="stats-row"></div>
+            <div class="chart-wrap">
+                <canvas id="weightChart"></canvas>
+                <div id="chartEmpty" class="empty-state">No logs yet — waiting for data…</div>
+            </div>
+            <div id="downsampleNote" class="downsample-note" style="display:none;"></div>
         </div>
     </div>
+
+    <div id="errorBanner" class="error-banner" style="position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); max-width: 90%;"></div>
 
     <!-- Leaflet Maps JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -42,61 +81,183 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <script>
-        async function loadDashboardData() {
-            // 1. Fetch the data from your own API
-            const response = await fetch('/api/logs');
-            const data = await response.json();
+        const POLL_INTERVAL_MS = 8000;
 
-            if (data.length === 0) return;
+        let map = null;
+        let markerLayer = null;
+        let chart = null;
+        let lastLogCount = -1; // used to skip redundant re-renders
 
-            // 2. Setup the Map
-            const firstPoint = data[0];
-            const map = L.map('map').setView([firstPoint.latitude, firstPoint.longitude], 12);
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const mapEmpty = document.getElementById('mapEmpty');
+        const chartEmpty = document.getElementById('chartEmpty');
+        const errorBanner = document.getElementById('errorBanner');
+        const statsRow = document.getElementById('statsRow');
+        const downsampleNote = document.getElementById('downsampleNote');
+
+        function renderStats(stats) {
+            const fmt = (v) => (v === null || v === undefined) ? '—' : v;
+            statsRow.innerHTML = `
+                <div class="stat"><strong>${fmt(stats.latest)}</strong>Latest (kg)</div>
+                <div class="stat"><strong>${fmt(stats.average)}</strong>Average (kg)</div>
+                <div class="stat"><strong>${fmt(stats.minimum)}</strong>Min (kg)</div>
+                <div class="stat"><strong>${fmt(stats.maximum)}</strong>Max (kg)</div>
+                <div class="stat"><strong>${fmt(stats.count)}</strong>Total logs</div>
+            `;
+        }
+
+        function setStatus(state, text) {
+            statusDot.className = 'status-dot' + (state ? ' ' + state : '');
+            statusText.textContent = text;
+        }
+
+        function showError(message) {
+            errorBanner.textContent = message;
+            errorBanner.classList.add('show');
+        }
+
+        function clearError() {
+            errorBanner.classList.remove('show');
+        }
+
+        function ensureMap() {
+            if (map) return;
+            map = L.map('map').setView([0, 0], 2);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; OpenStreetMap contributors'
             }).addTo(map);
+            markerLayer = L.layerGroup().addTo(map);
+        }
 
-            // Add pins to the map
-            data.forEach(log => {
-                const date = new Date(log.timestamp).toLocaleString();
-                L.marker([log.latitude, log.longitude])
-                 .addTo(map)
-                 .bindPopup(`<b>Weight:</b> ${log.weight} kg<br><b>Time:</b> ${date}`);
-            });
-
-            // 3. Setup the Chart
+        function ensureChart() {
+            if (chart) return;
             const ctx = document.getElementById('weightChart').getContext('2d');
-            
-            // Format data for Chart.js
-            const labels = data.map(log => {
-                const d = new Date(log.timestamp);
-                return `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`; // Just time for X-axis
-            });
-            const weights = data.map(log => log.weight);
-
-            new Chart(ctx, {
+            chart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: labels,
+                    labels: [],
                     datasets: [{
                         label: 'Load Cell Weight (kg)',
-                        data: weights,
+                        data: [],
                         borderColor: '#2563eb',
                         backgroundColor: 'rgba(37, 99, 235, 0.1)',
                         borderWidth: 2,
-                        tension: 0.3, // Adds a slight curve to the line
-                        fill: true
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 2
+                    }, {
+                        label: 'Moving average',
+                        data: [],
+                        borderColor: '#f97316',
+                        borderWidth: 2,
+                        borderDash: [4, 4],
+                        tension: 0.3,
+                        fill: false,
+                        pointRadius: 0
                     }]
                 },
                 options: {
                     responsive: true,
-                    maintainAspectRatio: false
+                    maintainAspectRatio: false,
+                    animation: { duration: 300 }
                 }
             });
         }
 
-        // Run when the page loads
+        function renderMap(data) {
+            ensureMap();
+            markerLayer.clearLayers();
+
+            const bounds = [];
+            data.forEach(log => {
+                const date = new Date(log.timestamp).toLocaleString();
+                L.marker([log.latitude, log.longitude])
+                 .addTo(markerLayer)
+                 .bindPopup(`<b>Weight:</b> ${log.weight} kg<br><b>Time:</b> ${date}`);
+                bounds.push([log.latitude, log.longitude]);
+            });
+
+            if (bounds.length === 1) {
+                map.setView(bounds[0], 14);
+            } else if (bounds.length > 1) {
+                map.fitBounds(bounds, { padding: [30, 30] });
+            }
+
+            // Leaflet needs an explicit nudge if the map div was hidden/resized
+            // since creation (e.g. first paint while container was 0-height).
+            setTimeout(() => map.invalidateSize(), 0);
+        }
+
+        function renderChart(chartPayload) {
+            ensureChart();
+            const labels = chartPayload.labels.map(ts => {
+                const d = new Date(ts);
+                return `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`;
+            });
+
+            chart.data.labels = labels;
+            chart.data.datasets[0].data = chartPayload.weights;
+            chart.data.datasets[1].data = chartPayload.moving_average;
+            chart.update();
+
+            downsampleNote.style.display = chartPayload.downsampled ? 'block' : 'none';
+            if (chartPayload.downsampled) {
+                downsampleNote.textContent =
+                    `Showing ${chartPayload.labels.length} of ${chartPayload.raw_point_count} points (downsampled)`;
+            }
+        }
+
+        async function loadDashboardData() {
+            try {
+                // /api/dashboard does the aggregation, GPS filtering, and
+                // downsampling server-side — the frontend just renders it.
+                const response = await fetch('/api/dashboard');
+                if (!response.ok) {
+                    throw new Error(`Server returned HTTP ${response.status}`);
+                }
+                const payload = await response.json();
+                clearError();
+                setStatus('live', `Live — updated ${new Date().toLocaleTimeString()}`);
+
+                const logCount = payload.stats.count;
+
+                if (!logCount) {
+                    mapEmpty.style.display = 'flex';
+                    chartEmpty.style.display = 'flex';
+                    lastLogCount = 0;
+                    return;
+                }
+
+                mapEmpty.style.display = 'none';
+                chartEmpty.style.display = 'none';
+
+                // Skip re-render work if nothing has changed since last poll.
+                if (logCount === lastLogCount) return;
+                lastLogCount = logCount;
+
+                renderStats(payload.stats);
+                renderMap(payload.map_points);
+                renderChart(payload.chart);
+
+                if (payload.dropped_gps_points > 0) {
+                    console.warn(`${payload.dropped_gps_points} log(s) had invalid GPS fixes and were left off the map.`);
+                }
+            } catch (err) {
+                setStatus('error', 'Connection issue');
+                showError(`Couldn't reach the server: ${err.message}. Retrying…`);
+                console.error('Dashboard fetch failed:', err);
+            }
+        }
+
+        // Initial load, then poll for live updates.
         loadDashboardData();
+        setInterval(loadDashboardData, POLL_INTERVAL_MS);
+
+        // Keep the map correctly sized on window/layout changes.
+        window.addEventListener('resize', () => {
+            if (map) map.invalidateSize();
+        });
     </script>
 </body>
 </html>

@@ -2,9 +2,12 @@ from fastapi import FastAPI, Depends
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, Float, String
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from typing import List
+from typing import List, Optional
 import os
 from fastapi.responses import HTMLResponse
+from dataclasses import asdict
+
+from dashboard_service import DashboardService
 
 # 1. Database Setup
 # Render provides the DATABASE_URL environment variable automatically
@@ -74,6 +77,34 @@ def sync_logs(logs: List[LogData], db: Session = Depends(get_db)):
 def get_logs(db: Session = Depends(get_db)):
     """Fetches all data points to display on the Flutter map."""
     return db.query(LogEntry).all()
+
+@app.get("/api/dashboard", summary="Get processed data for the web dashboard")
+def get_dashboard_data(
+    max_chart_points: int = 200,
+    moving_avg_window: int = 5,
+    db: Session = Depends(get_db),
+):
+    """
+    Processed view of the log data for the web dashboard, so the frontend
+    doesn't have to re-fetch and re-crunch the entire raw table on every
+    poll. Returns:
+      - stats: latest/avg/min/max weight
+      - chart: downsampled + smoothed weight-over-time series
+      - map_points: GPS points with invalid (0,0 / out-of-range) fixes dropped
+      - dropped_gps_points: count of points filtered out, for transparency
+    """
+    logs = db.query(LogEntry).order_by(LogEntry.id).all()
+    service = DashboardService(
+        max_chart_points=max_chart_points,
+        moving_avg_window=moving_avg_window,
+    )
+    payload = service.build(logs)
+    return {
+        "stats": asdict(payload.stats),
+        "chart": asdict(payload.chart),
+        "map_points": [asdict(p) for p in payload.map_points],
+        "dropped_gps_points": payload.dropped_gps_points,
+    }
 
 @app.get("/", response_class=HTMLResponse, summary="Serve Web Dashboard")
 def serve_dashboard():
