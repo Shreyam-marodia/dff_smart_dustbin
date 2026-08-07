@@ -16,7 +16,7 @@ from statistics import mean
 
 # Points beyond ~250-300 don't add visible resolution to a line chart on a
 # normal screen, and each one is a label + two numbers over the wire.
-DEFAULT_MAX_CHART_POINTS = 200
+DEFAULT_MAX_CHART_POINTS = 30
 
 # Simple centered moving average window for smoothing the weight line.
 # Odd number so the window is symmetric around each point.
