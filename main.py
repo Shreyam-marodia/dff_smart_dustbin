@@ -85,9 +85,20 @@ def sync_logs(logs: List[LogData], db: Session = Depends(get_db)):
     return {"status": "success", "inserted_count": len(logs)}
 
 @app.get("/api/logs", response_model=List[LogResponse], summary="Get all logs for Map")
-def get_logs(db: Session = Depends(get_db)):
-    """Fetches all data points to display on the Flutter map."""
-    return db.query(LogEntry).all()
+def get_logs(limit: int = 500, db: Session = Depends(get_db)):
+    """Fetches recent data points to display on the Flutter map.
+
+    Capped at `limit` (default 500, most recent first by id) instead of
+    returning the entire table — this endpoint has no LIMIT today and will
+    only get slower as the table grows. Pass ?limit=0 to get everything
+    (kept as an escape hatch, not the default).
+    """
+    query = db.query(LogEntry).order_by(LogEntry.id.desc())
+    if limit and limit > 0:
+        query = query.limit(limit)
+    logs = query.all()
+    logs.reverse()  # keep chronological order like before
+    return logs
 
 @app.get("/api/dashboard", summary="Get processed data for the web dashboard")
 def get_dashboard_data(
