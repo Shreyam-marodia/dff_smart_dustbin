@@ -1,11 +1,12 @@
 
 from fastapi import FastAPI, Depends
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, Float, String, func
+from sqlalchemy import create_engine, Column, Integer, Float, String, func, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from typing import List, Optional
 import os
 import time
+from types import SimpleNamespace
 from fastapi.responses import HTMLResponse
 from dataclasses import asdict
 
@@ -109,6 +110,11 @@ def get_dashboard_data(
     we first run one cheap aggregate query (COUNT + MAX(id) — index-backed,
     tiny payload) to check whether anything actually changed, and only
     do the expensive full fetch + processing when it has.
+
+    On a cache miss we used to run two more separate round trips: one to
+    fetch the last 100 rows, one to compute all-time avg/min/max. Those are
+    now combined into a single query (last-100-rows CROSS JOIN all-time
+    aggregate), so a cache miss costs 2 round trips total instead of 3.
     """
     row_count, latest_id = db.query(
         func.count(LogEntry.id), func.max(LogEntry.id)
@@ -120,19 +126,56 @@ def get_dashboard_data(
     if cached and not stale:
         return _dashboard_cache["payload"]
 
-    logs = db.query(LogEntry).order_by(LogEntry.id.desc()).limit(100).all()
-    logs.reverse()
+    # Single round trip: last 100 rows (oldest-first) joined against one
+    # all-time aggregate row. Works on both SQLite (local dev) and Postgres.
+    rows = db.execute(text("""
+        SELECT logs.id, logs.weight, logs.latitude, logs.longitude, logs.timestamp,
+               agg.total_count, agg.avg_weight, agg.min_weight, agg.max_weight
+        FROM (
+            SELECT id, weight, latitude, longitude, timestamp
+            FROM load_cell_logs
+            ORDER BY id DESC
+            LIMIT 100
+        ) AS logs
+        CROSS JOIN (
+            SELECT COUNT(*) AS total_count,
+                   AVG(weight) AS avg_weight,
+                   MIN(weight) AS min_weight,
+                   MAX(weight) AS max_weight
+            FROM load_cell_logs
+        ) AS agg
+        ORDER BY logs.id ASC
+    """)).mappings().all()
+
+    # DashboardService expects attribute access (log.weight, log.latitude,
+    # ...) since it's normally fed ORM rows — wrap the raw dict rows so it
+    # doesn't need to know it's getting raw SQL results here.
+    logs = [
+        SimpleNamespace(
+            id=r["id"],
+            weight=r["weight"],
+            latitude=r["latitude"],
+            longitude=r["longitude"],
+            timestamp=r["timestamp"],
+        )
+        for r in rows
+    ]
+
     service = DashboardService(
         max_chart_points=max_chart_points,
         moving_avg_window=moving_avg_window,
     )
-    # Fetch all-time stats directly from the database using SQL
-    db_stats = db.query(
-        func.count(LogEntry.id),
-        func.avg(LogEntry.weight),
-        func.min(LogEntry.weight),
-        func.max(LogEntry.weight)
-    ).one()
+
+    if rows:
+        first = rows[0]
+        db_stats = (
+            first["total_count"],
+            first["avg_weight"],
+            first["min_weight"],
+            first["max_weight"],
+        )
+    else:
+        db_stats = (0, None, None, None)
 
     # Pass the database stats into the service
     payload = service.build(logs, db_stats=db_stats)

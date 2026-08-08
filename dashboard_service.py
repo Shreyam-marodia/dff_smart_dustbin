@@ -115,6 +115,30 @@ class DashboardService:
                 maximum=max(weights),
             )
 
+        chart = self._build_chart_series(logs)
+
+        map_points = []
+        dropped_gps_points = 0
+        for log in logs:
+            if _is_valid_coord(log.latitude, log.longitude):
+                map_points.append(
+                    MapPoint(
+                        latitude=log.latitude,
+                        longitude=log.longitude,
+                        weight=log.weight,
+                        timestamp=log.timestamp,
+                    )
+                )
+            else:
+                dropped_gps_points += 1
+
+        return DashboardPayload(
+            stats=stats,
+            chart=chart,
+            map_points=map_points,
+            dropped_gps_points=dropped_gps_points,
+        )
+
     def _build_chart_series(self, logs: list) -> ChartSeries:
         raw_count = len(logs)
         sampled = self._downsample(logs, self.max_chart_points)
