@@ -82,7 +82,7 @@ class DashboardService:
         self.max_chart_points = max_chart_points
         self.moving_avg_window = moving_avg_window
 
-    def build(self, logs: list) -> DashboardPayload:
+    def build(self, logs: list, db_stats: tuple = None) -> DashboardPayload:
         """
         `logs` is a list of ORM rows (or anything with .weight, .latitude,
         .longitude, .timestamp attributes), already ordered oldest-first.
@@ -95,38 +95,25 @@ class DashboardService:
                 dropped_gps_points=0,
             )
 
-        weights = [log.weight for log in logs]
-        stats = WeightStats(
-            count=len(logs),
-            latest=weights[-1],
-            average=round(mean(weights), 3),
-            minimum=min(weights),
-            maximum=max(weights),
-        )
-
-        map_points = []
-        dropped = 0
-        for log in logs:
-            if _is_valid_coord(log.latitude, log.longitude):
-                map_points.append(
-                    MapPoint(
-                        latitude=log.latitude,
-                        longitude=log.longitude,
-                        weight=log.weight,
-                        timestamp=log.timestamp,
-                    )
-                )
-            else:
-                dropped += 1
-
-        chart = self._build_chart_series(logs)
-
-        return DashboardPayload(
-            stats=stats,
-            chart=chart,
-            map_points=map_points,
-            dropped_gps_points=dropped,
-        )
+        # Use database stats if provided, otherwise fallback to Python math
+        if db_stats:
+            total_count, avg_weight, min_weight, max_weight = db_stats
+            stats = WeightStats(
+                count=total_count or 0,
+                latest=logs[-1].weight,
+                average=round(avg_weight, 3) if avg_weight is not None else None,
+                minimum=min_weight,
+                maximum=max_weight,
+            )
+        else:
+            weights = [log.weight for log in logs]
+            stats = WeightStats(
+                count=len(logs),
+                latest=weights[-1],
+                average=round(mean(weights), 3),
+                minimum=min(weights),
+                maximum=max(weights),
+            )
 
     def _build_chart_series(self, logs: list) -> ChartSeries:
         raw_count = len(logs)

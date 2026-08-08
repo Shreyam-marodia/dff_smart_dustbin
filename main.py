@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from dashboard_service import DashboardService
 
+
 # 1. Database Setup
 # Render provides the DATABASE_URL environment variable automatically
 # We replace 'postgres://' with 'postgresql://' as required by modern SQLAlchemy
@@ -119,12 +120,22 @@ def get_dashboard_data(
     if cached and not stale:
         return _dashboard_cache["payload"]
 
-    logs = db.query(LogEntry).order_by(LogEntry.id).all()
+    logs = db.query(LogEntry).order_by(LogEntry.id.desc()).limit(100).all()
+    logs.reverse()
     service = DashboardService(
         max_chart_points=max_chart_points,
         moving_avg_window=moving_avg_window,
     )
-    payload = service.build(logs)
+    # Fetch all-time stats directly from the database using SQL
+    db_stats = db.query(
+        func.count(LogEntry.id),
+        func.avg(LogEntry.weight),
+        func.min(LogEntry.weight),
+        func.max(LogEntry.weight)
+    ).one()
+
+    # Pass the database stats into the service
+    payload = service.build(logs, db_stats=db_stats)
     response_body = {
         "stats": asdict(payload.stats),
         "chart": asdict(payload.chart),
